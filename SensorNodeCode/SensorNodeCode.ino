@@ -23,8 +23,10 @@
 typedef struct {
   uint32_t count;
   uint32_t priority;
-  uint32_t data;
-  bool ready;
+  int32_t  data;
+  int32_t  data2;
+  int32_t  data3;
+  bool     ready;
 } __attribute__((packed)) esp_now_data_t;
 
 /* Global Variables */
