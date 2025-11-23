@@ -34,6 +34,8 @@ enum MsgType : uint8_t {
   MSG_SERVO_COMMAND   = 8
 };
 
+/* Shared data struct on all nodes */
+// HMI / Sensor / Servo / Pump
 typedef struct {
   uint8_t  msg_type;
   uint8_t  rsvd[3];
@@ -632,6 +634,7 @@ void setup() {
 }
 
 /* Loop */
+/* Loop */
 void loop() {
   static unsigned long lastCommTime = 0;
   unsigned long now = millis();
@@ -639,6 +642,10 @@ void loop() {
   if (!master_decided) {
     if (now - lastCommTime >= ESPNOW_COMM_INTERVAL_MS) {
       lastCommTime = now;
+      // Update ready flag if all peers found
+      if (current_peer_count >= ESPNOW_PEER_COUNT) {
+        new_msg.ready = true;
+      }
       broadcast_peer.send_message((const uint8_t *)&new_msg, sizeof(new_msg));
 
       if (current_peer_count == ESPNOW_PEER_COUNT && check_all_peers_ready()) {

@@ -25,7 +25,7 @@
 #define PRIORITY_PUMP 3
 #define PRIORITY_HEAD 5
 
-/* Message types and struct */
+/* Message types and struct (shared) */
 enum MsgType : uint8_t {
   MSG_DISCOVERY       = 0,
   MSG_POLL_SENSOR     = 1,
@@ -38,6 +38,8 @@ enum MsgType : uint8_t {
   MSG_SERVO_COMMAND   = 8
 };
 
+/* Shared data struct on all nodes */
+// HMI / Sensor / Servo / Pump
 typedef struct {
   uint8_t  msg_type;
   uint8_t  rsvd[3];

@@ -23,7 +23,7 @@
 #define PRIORITY_SENSOR 1
 #define PRIORITY_HEAD   5
 
-/* Message types and struct */
+/* Message types and struct (shared) */
 enum MsgType : uint8_t {
   MSG_DISCOVERY       = 0,
   MSG_POLL_SENSOR     = 1,
@@ -36,6 +36,8 @@ enum MsgType : uint8_t {
   MSG_SERVO_COMMAND   = 8
 };
 
+/* Shared data struct on all nodes */
+// HMI / Sensor / Servo / Pump
 typedef struct {
   uint8_t  msg_type;
   uint8_t  rsvd[3];
@@ -103,7 +105,11 @@ public:
     if (!peer_is_master) return;
 
     if (msg->msg_type == MSG_POLL_SENSOR) {
+      Serial.println("[SENSOR] Received poll request from HEAD");
+      
       long dist = readUltrasonicCm();
+      Serial.printf("[SENSOR] Ultrasonic reading: %ld cm (distance to water surface)\n", dist);
+      
       esp_now_data_t reply;
       memset(&reply, 0, sizeof(reply));
       reply.msg_type = MSG_SENSOR_DATA;
@@ -113,9 +119,9 @@ public:
       reply.ready    = true;
 
       if (!send_message((const uint8_t *)&reply, sizeof(reply))) {
-        Serial.println("Failed to send SENSOR_DATA");
+        Serial.println("[SENSOR] Failed to send SENSOR_DATA");
       } else {
-        Serial.printf("Sent SENSOR_DATA: %ld cm\n", dist);
+        Serial.printf("[SENSOR] Sent SENSOR_DATA: %ld cm to HEAD\n", dist);
       }
     }
   }
