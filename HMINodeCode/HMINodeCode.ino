@@ -148,6 +148,8 @@ public:
   }
 
   void onReceive(const uint8_t *data, size_t len, bool broadcast) {
+    Serial.printf("[HMI_RX] len=%d, broadcast=%d\n", len, broadcast);
+    
     esp_now_data_t *msg = (esp_now_data_t *)data;
 
     if (!peer_ready && msg->ready) {
@@ -155,14 +157,22 @@ public:
       peer_ready = true;
     }
 
-    if (broadcast) return;
+    if (broadcast) {
+      Serial.println("[HMI_RX] Ignoring broadcast");
+      return;
+    }
 
     recv_msg_count++;
+    Serial.printf("[HMI_RX] msg_type=%d, peer_is_master=%d\n", msg->msg_type, peer_is_master);
 
-    if (!peer_is_master) return;
+    if (!peer_is_master) {
+      Serial.println("[HMI_RX] Ignoring - sender not master");
+      return;
+    }
 
     switch (msg->msg_type) {
       case MSG_CONTROL_STATUS:
+        Serial.println("[HMI_RX] Processing CONTROL_STATUS");
         // data  = waterLevel
         // data2 = pumpPower
         // data3 = servoPosition (optional)
@@ -174,6 +184,7 @@ public:
         break;
 
       case MSG_POLL_HMI: {
+        Serial.println("[HMI_RX] Processing POLL_HMI - sending response");
         // Head polling for setpoint, PID, and servo disturbance
         esp_now_data_t reply;
         memset(&reply, 0, sizeof(reply));
@@ -187,9 +198,9 @@ public:
         reply.ready    = true;
 
         if (!send_message((const uint8_t *)&reply, sizeof(reply))) {
-          Serial.println("Failed to send HMI_SETPOINT to HEAD");
+          Serial.println("[HMI_TX] Failed to send HMI_SETPOINT to HEAD");
         } else {
-          Serial.printf("Sent SP=%d, Kp_x10=%d, Ki_x10=%d, Kd_x10=%d to HEAD\n",
+          Serial.printf("[HMI_TX] Sent SP=%d, Kp_x10=%d, Ki_x10=%d, Kd_x10=%d to HEAD\n",
                         setpoint, Kp_x10, Ki_x10, Kd_x10);
         }
 
@@ -203,14 +214,15 @@ public:
         reply2.ready    = true;
 
         if (!send_message((const uint8_t *)&reply2, sizeof(reply2))) {
-          Serial.println("Failed to send SERVO_SETPOINT to HEAD");
+          Serial.println("[HMI_TX] Failed to send SERVO_SETPOINT to HEAD");
         } else {
-          Serial.printf("Sent Servo=%d deg to HEAD\n", servoPosition);
+          Serial.printf("[HMI_TX] Sent Servo=%d deg to HEAD\n", servoPosition);
         }
         break;
       }
 
       default:
+        Serial.printf("[HMI_RX] Unknown msg_type=%d\n", msg->msg_type);
         break;
     }
   }
