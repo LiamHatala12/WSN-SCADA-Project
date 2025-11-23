@@ -8,14 +8,17 @@
 #include <new>
 
 /* Definitions */
-#define ESPNOW_WIFI_IFACE WIFI_IF_STA
-#define ESPNOW_WIFI_CHANNEL 4
+#define ESPNOW_WIFI_IFACE       WIFI_IF_STA
+#define ESPNOW_WIFI_CHANNEL     4
 #define ESPNOW_COMM_INTERVAL_MS 100
-#define ESPNOW_PEER_COUNT 1
-#define REPORT_INTERVAL 5
+#define ESPNOW_PEER_COUNT       1
+#define REPORT_INTERVAL         5
 
 #define ESPNOW_EXAMPLE_PMK "pmk1234567890123"
 #define ESPNOW_EXAMPLE_LMK "lmk1234567890123"
+
+#define PRIORITY_HMI  0
+#define PRIORITY_HEAD 5
 
 // TFT Screen pins
 #define TFT_CS   5
@@ -27,16 +30,29 @@
 #define CLK_PIN  21
 #define DT_PIN   22
 
-#define MAX_CM 24            // Maximum water level
-#define TANK_RADIUS 10.75    // Tank radius in cm
+#define MAX_CM      24        // Maximum water level
+#define TANK_RADIUS 10.75     // Tank radius in cm
 
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
-/* Shared ESP-NOW data struct (matches head node) */
+/* Message types (must match head) */
+enum MsgType : uint8_t {
+  MSG_DISCOVERY       = 0,
+  MSG_POLL_SENSOR     = 1,
+  MSG_SENSOR_DATA     = 2,
+  MSG_POLL_HMI        = 3,
+  MSG_HMI_SETPOINT    = 4,
+  MSG_CONTROL_COMMAND = 5,
+  MSG_CONTROL_STATUS  = 6
+};
+
+/* Shared ESP-NOW data struct */
 typedef struct {
+  uint8_t  msg_type;   // MsgType
+  uint8_t  rsvd[3];
   uint32_t count;
   uint32_t priority;
-  int32_t  data;    // meaning depends on direction
+  int32_t  data;
   int32_t  data2;
   int32_t  data3;
   bool     ready;
@@ -45,32 +61,32 @@ typedef struct {
 /* Global Variables */
 
 volatile int setpoint = 0;          // cm, from encoder
-int setpointPercent = 0;            // %
-uint32_t waterLevel = 0;            // cm, from head
+int setpointPercent   = 0;          // %
+uint32_t waterLevel   = 0;          // cm, from head
 int waterLevelPercent = 0;          // %
-int volume = 0;                     // mL
-int servoPosition = 0;              // degrees, from head
-int pumpPower = 0;                  // %, from head
+int volume            = 0;          // mL
+int servoPosition     = 0;          // degrees, from head
+int pumpPower         = 0;          // %, from head
 
 // Track last displayed values
-int lastSetpoint = -1;
-int lastSetpointPercent = -1;
-int lastWaterLevel = -1;
+int lastSetpoint         = -1;
+int lastSetpointPercent  = -1;
+int lastWaterLevel       = -1;
 int lastWaterLevelPercent = -1;
-int lastVolume = -1;
-int lastServoPosition = -1;
-int lastPumpPower = -1;
+int lastVolume           = -1;
+int lastServoPosition    = -1;
+int lastPumpPower        = -1;
 
 // Rotary Encoder
-volatile int counter = 0;
-volatile int lastEncoded = 0;
+volatile int counter      = 0;
+volatile int lastEncoded  = 0;
 
-uint32_t self_priority = 0;
+uint32_t self_priority      = PRIORITY_HMI;
 uint8_t  current_peer_count = 0;
-bool     device_is_master = false;
-bool     master_decided = false;
-uint32_t sent_msg_count = 0;
-uint32_t recv_msg_count = 0;
+bool     device_is_master   = false;
+bool     master_decided     = false;
+uint32_t sent_msg_count     = 0;
+uint32_t recv_msg_count     = 0;
 esp_now_data_t new_msg;
 std::vector<uint32_t> last_data(5, 0);
 
@@ -113,29 +129,49 @@ public:
       peer_ready = true;
     }
 
-    if (!broadcast) {
-      recv_msg_count++;
+    if (broadcast) {
+      return;
+    }
 
-      // For HMI, the only peer is expected to be the head node (master)
-      if (peer_is_master) {
-        // Head sends status: data  = water level, data2 = pump power, data3 = servo angle
+    recv_msg_count++;
+
+    // For HMI, the only peer is expected to be the head node (master)
+    if (peer_is_master) {
+      if (msg->msg_type == MSG_CONTROL_STATUS) {
+        // Head sends status: data = water level, data2 = pump power, data3 = servo angle
         waterLevel    = (uint32_t)msg->data;
         pumpPower     = (int)msg->data2;
         servoPosition = (int)msg->data3;
 
-        Serial.printf("Received status from master " MACSTR "\n", MAC2STR(addr()));
+        Serial.printf("Received CONTROL_STATUS from master " MACSTR "\n", MAC2STR(addr()));
         Serial.printf("  Level: %lu cm, Pump: %d %%, Servo: %d deg\n",
-                      waterLevel, pumpPower, servoPosition);
+                      (unsigned long)waterLevel, pumpPower, servoPosition);
 
         last_data.push_back(waterLevel);
         last_data.erase(last_data.begin());
-      } else if (device_is_master) {
-        // Not used for HMI in this design
-        Serial.println("Received a message as master");
-        Serial.printf("  Data: %ld\n", (long)msg->data);
+      } else if (msg->msg_type == MSG_POLL_HMI) {
+        // Head is polling HMI for current setpoint
+        esp_now_data_t reply;
+        memset(&reply, 0, sizeof(reply));
+        reply.msg_type = MSG_HMI_SETPOINT;
+        reply.priority = self_priority;
+        reply.count    = ++sent_msg_count;
+        reply.data     = (int32_t)setpoint;
+        reply.ready    = true;
+
+        Serial.printf("Polled by master %s, sending setpoint %d cm\n",
+                      WiFi.macAddress().c_str(), setpoint);
+
+        if (!send_message((const uint8_t *)&reply, sizeof(reply))) {
+          Serial.println("Failed to send HMI_SETPOINT to master");
+        }
       } else {
-        Serial.printf("Peer " MACSTR " says: data=%ld\n", MAC2STR(addr()), (long)msg->data);
+        Serial.printf("Received unexpected msg_type %d from master\n", msg->msg_type);
       }
+    } else if (device_is_master) {
+      Serial.println("Received a message as master (unexpected for HMI)");
+    } else {
+      Serial.printf("Peer " MACSTR " says: data=%ld\n", MAC2STR(addr()), (long)msg->data);
     }
   }
 
@@ -152,7 +188,7 @@ public:
 
 /* Peers */
 std::vector<ESP_NOW_Network_Peer *> peers;
-ESP_NOW_Network_Peer broadcast_peer(ESP_NOW.BROADCAST_ADDR, 0, nullptr);
+ESP_NOW_Network_Peer  broadcast_peer(ESP_NOW.BROADCAST_ADDR, 0, nullptr);
 ESP_NOW_Network_Peer *master_peer = nullptr;
 
 /* Helper functions */
@@ -189,15 +225,6 @@ uint32_t check_highest_priority() {
   return std::max(highest_priority, self_priority);
 }
 
-uint32_t calc_average() {
-  if (last_data.empty()) return 0;
-  uint32_t avg = 0;
-  for (auto &d : last_data) {
-    avg += d;
-  }
-  return avg / last_data.size();
-}
-
 bool check_all_peers_ready() {
   for (auto &peer : peers) {
     if (!peer->peer_ready) return false;
@@ -206,7 +233,7 @@ bool check_all_peers_ready() {
 }
 
 int calculateVolume(int level_cm) {
-  float volume_ml = 3.14159 * TANK_RADIUS * TANK_RADIUS * level_cm;
+  float volume_ml = 3.14159f * TANK_RADIUS * TANK_RADIUS * level_cm;
   return (int)volume_ml;
 }
 
@@ -263,7 +290,7 @@ void updateSetpointDisplay() {
 void updateWaterLevelDisplay() {
   if ((int)waterLevel != lastWaterLevel) {
     waterLevelPercent = (waterLevel * 100) / MAX_CM;
-    volume = calculateVolume(waterLevel);
+    volume = calculateVolume((int)waterLevel);
 
     tft.fillRect(20, 130, 200, 30, ST77XX_BLACK);
     tft.setTextSize(4);
@@ -345,7 +372,7 @@ void register_new_peer(const esp_now_recv_info_t *info,
                        int len,
                        void *arg) {
   esp_now_data_t *msg = (esp_now_data_t *)data;
-  int priority = msg->priority;
+  int priority        = msg->priority;
 
   if ((uint32_t)priority == self_priority) {
     Serial.println("ERROR! Device has the same priority as this device. Unsupported behavior.");
@@ -353,7 +380,8 @@ void register_new_peer(const esp_now_recv_info_t *info,
   }
 
   if (current_peer_count < ESPNOW_PEER_COUNT) {
-    Serial.printf("New peer found: " MACSTR " with priority %d\n", MAC2STR(info->src_addr), priority);
+    Serial.printf("New peer found: " MACSTR " with priority %d\n",
+                  MAC2STR(info->src_addr), priority);
     ESP_NOW_Network_Peer *new_peer =
       new (std::nothrow) ESP_NOW_Network_Peer(info->src_addr, priority);
     if (new_peer == nullptr || !new_peer->begin()) {
@@ -363,11 +391,13 @@ void register_new_peer(const esp_now_recv_info_t *info,
     }
     peers.push_back(new_peer);
     current_peer_count++;
+
     if ((uint32_t)priority > self_priority) {
       new_peer->peer_is_master = true;
       master_peer = new_peer;
       Serial.println("Peer identified as master");
     }
+
     if (current_peer_count == ESPNOW_PEER_COUNT) {
       Serial.println("All peers found");
       new_msg.ready = true;
@@ -381,7 +411,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(100);
-  Serial.println("=== Water Tank HMI ===");
+  Serial.println("=== Water Tank HMI (polled) ===");
 
   // Initialize display
   tft.init(240, 320);
@@ -401,7 +431,7 @@ void setup() {
   WiFi.setChannel(ESPNOW_WIFI_CHANNEL);
   while (!WiFi.STA.started()) delay(10);
 
-  self_priority = 0;  // HMI has lowest priority
+  self_priority = PRIORITY_HMI;  // HMI has lowest priority
 
   Serial.println("  WiFi initialized");
   Serial.printf("  MAC: %s\n", WiFi.macAddress().c_str());
@@ -432,6 +462,7 @@ void setup() {
   Serial.println("ESP-NOW initialized");
 
   memset(&new_msg, 0, sizeof(new_msg));
+  new_msg.msg_type = MSG_DISCOVERY;
   new_msg.priority = self_priority;
   new_msg.ready    = false;
 
@@ -467,20 +498,8 @@ void loop() {
         }
       }
     } else {
-      // HMI is slave: send setpoint to master if known
-      if (!device_is_master && master_peer != nullptr) {
-        new_msg.count = ++sent_msg_count;
-        new_msg.data  = (int32_t)setpoint;  // user setpoint in cm
-        new_msg.data2 = 0;
-        new_msg.data3 = 0;
-        new_msg.ready = true;
-
-        if (!master_peer->send_message((const uint8_t *)&new_msg, sizeof(new_msg))) {
-          Serial.println("Failed to send setpoint to master");
-        } else {
-          Serial.printf("Sent setpoint %d cm to master\n", setpoint);
-        }
-      }
+      // After discovery, HMI does not push setpoint anymore.
+      // It only sends MSG_HMI_SETPOINT when polled in onReceive.
     }
   }
 
