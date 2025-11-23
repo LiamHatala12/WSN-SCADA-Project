@@ -46,7 +46,7 @@ typedef struct {
 
 volatile int setpoint = 0;          // cm, from encoder
 int setpointPercent = 0;            // %
-volatile uint32_t waterLevel = 0;   // cm, from head
+uint32_t waterLevel = 0;            // cm, from head
 int waterLevelPercent = 0;          // %
 int volume = 0;                     // mL
 int servoPosition = 0;              // degrees, from head
@@ -66,9 +66,9 @@ volatile int counter = 0;
 volatile int lastEncoded = 0;
 
 uint32_t self_priority = 0;
-uint8_t current_peer_count = 0;
-bool device_is_master = false;
-bool master_decided = false;
+uint8_t  current_peer_count = 0;
+bool     device_is_master = false;
+bool     master_decided = false;
 uint32_t sent_msg_count = 0;
 uint32_t recv_msg_count = 0;
 esp_now_data_t new_msg;
@@ -78,8 +78,8 @@ std::vector<uint32_t> last_data(5, 0);
 class ESP_NOW_Network_Peer : public ESP_NOW_Peer {
 public:
   uint32_t priority;
-  bool peer_is_master = false;
-  bool peer_ready = false;
+  bool     peer_is_master = false;
+  bool     peer_ready     = false;
 
   ESP_NOW_Network_Peer(const uint8_t *mac_addr,
                        uint32_t priority = 0,
@@ -119,8 +119,8 @@ public:
       // For HMI, the only peer is expected to be the head node (master)
       if (peer_is_master) {
         // Head sends status: data  = water level, data2 = pump power, data3 = servo angle
-        waterLevel   = (uint32_t)msg->data;
-        pumpPower    = (int)msg->data2;
+        waterLevel    = (uint32_t)msg->data;
+        pumpPower     = (int)msg->data2;
         servoPosition = (int)msg->data3;
 
         Serial.printf("Received status from master " MACSTR "\n", MAC2STR(addr()));

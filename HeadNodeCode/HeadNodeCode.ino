@@ -1,10 +1,10 @@
 /*
-  ESP-NOW Master Node with FreeRTOS
+  ESP-NOW Master Node with FreeRTOS + HMI
   - Receives distance in cm from ultrasonic sensor node (priority 1)
-  - Receives user setpoint from HMI node (priority 0)
+  - Receives user setpoint in cm from HMI node (priority 0)
   - Computes error = setpoint_cm - measured_cm
   - Sends error to actuator node (priority 2)
-  - Sends status (water level, pump power, servo position) to HMI node
+  - Sends status (level, pump, servo) to HMI
   - Uses FreeRTOS queue and task to handle sensor data and control logic
 */
 
@@ -15,7 +15,7 @@
 #include <new>
 #include <algorithm>
 
-// FreeRTOS includes (already part of ESP32 Arduino core)
+// FreeRTOS includes
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -23,47 +23,38 @@
 /* Definitions */
 #define ESPNOW_WIFI_IFACE       WIFI_IF_STA
 #define ESPNOW_WIFI_CHANNEL     4
-// sensor (1) + actuator (2) + HMI (0)
-#define ESPNOW_PEER_COUNT       3
 #define ESPNOW_SEND_INTERVAL_MS 5000
+#define ESPNOW_PEER_COUNT       3      // sensor (1) + actuator (2) + HMI (0)
 #define REPORT_INTERVAL         5
 
 #define ESPNOW_EXAMPLE_PMK "pmk1234567890123"
 #define ESPNOW_EXAMPLE_LMK "lmk1234567890123"
 
-// Default user setpoint in cm
+// Default setpoint (cm) if HMI not yet used
 static const int32_t DEFAULT_SETPOINT_CM = 60;
 
-/* Data struct - must match on head and HMI
-   Semantics depend on peer role and direction:
-   - Sensor -> Master: data  = distance_cm
-   - HMI -> Master   : data  = setpoint_cm
-   - Master -> Act   : data  = error_cm
-   - Master -> HMI   : data  = water_level_cm
-                       data2 = pump_power_percent
-                       data3 = servo_position_deg
-*/
+/* Data struct - shared across all nodes */
 typedef struct {
   uint32_t count;
   uint32_t priority;
-  int32_t  data;
+  int32_t  data;    // semantic depends on direction
   int32_t  data2;
   int32_t  data3;
   bool     ready;
 } __attribute__((packed)) esp_now_data_t;
 
 /* Global Variables */
-// Latest sensor value (cm) for debugging
-volatile int32_t sensorData          = 0;
-volatile int32_t lastError           = 0;
+// Latest sensor value (cm) and error for debugging
+volatile int32_t sensorData        = 0;
+volatile int32_t lastError         = 0;
 volatile int32_t current_setpoint_cm = DEFAULT_SETPOINT_CM;
 
-uint32_t self_priority      = 0;
-uint8_t current_peer_count  = 0;
-bool device_is_master       = false;
-bool master_decided         = false;
-uint32_t sent_msg_count     = 0;
-uint32_t recv_msg_count     = 0;
+uint32_t self_priority       = 0;
+uint8_t  current_peer_count  = 0;
+bool     device_is_master    = false;
+bool     master_decided      = false;
+uint32_t sent_msg_count      = 0;
+uint32_t recv_msg_count      = 0;
 esp_now_data_t new_msg;
 
 // Keep a small window of last readings
@@ -81,24 +72,23 @@ int32_t compute_pump_power_percent(int32_t error_cm) {
   if (e > MAX_ERROR_FOR_PUMP) {
     e = MAX_ERROR_FOR_PUMP;
   }
-  long p = map((long)e, 0L, (long)MAX_ERROR_FOR_PUMP, 0L, 100L);
-  if (p < 0) p = 0;
-  if (p > 100) p = 100;
-  return (int32_t)p;
+  // simple proportional mapping: 0..MAX_ERROR_FOR_PUMP -> 0..100
+  return (e * 100) / MAX_ERROR_FOR_PUMP;
 }
 
 int32_t compute_servo_position_deg(int32_t error_cm) {
+  // Map error from [-MAX_ERROR_FOR_PUMP, MAX_ERROR_FOR_PUMP] to [0, 180]
   int32_t e = error_cm;
-  if (e > MAX_ERROR_FOR_PUMP)  e = MAX_ERROR_FOR_PUMP;
+  if (e >  MAX_ERROR_FOR_PUMP) e =  MAX_ERROR_FOR_PUMP;
   if (e < -MAX_ERROR_FOR_PUMP) e = -MAX_ERROR_FOR_PUMP;
-  long angle = map((long)e,
-                   (long)-MAX_ERROR_FOR_PUMP,
-                   (long) MAX_ERROR_FOR_PUMP,
-                   0L,
-                   180L);
-  if (angle < 0)   angle = 0;
-  if (angle > 180) angle = 180;
-  return (int32_t)angle;
+
+  // Normalized: -MAX -> 0, 0 -> 90, +MAX -> 180
+  int32_t mid = 90;
+  int32_t span = 90;
+  int32_t servo = mid + (e * span) / MAX_ERROR_FOR_PUMP;
+  if (servo < 0) servo = 0;
+  if (servo > 180) servo = 180;
+  return servo;
 }
 
 /* Classes */
@@ -112,9 +102,9 @@ public:
   };
 
   uint32_t priority;
-  bool peer_is_master = false;
-  bool peer_ready     = false;
-  PeerRole role       = PEER_ROLE_UNKNOWN;
+  bool     peer_is_master = false;
+  bool     peer_ready     = false;
+  PeerRole role           = PEER_ROLE_UNKNOWN;
 
   ESP_NOW_Network_Peer(const uint8_t *mac_addr,
                        uint32_t priority = 0,
@@ -151,7 +141,7 @@ public:
     if (!broadcast) {
       recv_msg_count++;
 
-      // Sensor -> Master: distance in cm
+      // Master receives sensor data from sensor node
       if (device_is_master && role == PEER_ROLE_SENSOR) {
         int32_t distance_cm = msg->data;
 
@@ -169,9 +159,10 @@ public:
         }
       }
       // HMI -> Master: user defined setpoint in cm
-      else if (device_is_master && role == PEER_ROLE_HMI) {
+      // Accept either explicit HMI role or priority 0 (extra safety)
+      else if (device_is_master && (role == PEER_ROLE_HMI || priority == 0)) {
         int32_t new_setpoint = msg->data;
-        current_setpoint_cm = new_setpoint;
+        current_setpoint_cm  = new_setpoint;
 
         Serial.printf("Received setpoint update from HMI " MACSTR "\n", MAC2STR(addr()));
         Serial.printf("  New setpoint: %ld cm\n", (long)new_setpoint);
@@ -244,10 +235,10 @@ bool check_all_peers_ready() {
    - Uses current_setpoint_cm (updated by HMI)
    - Computes error = setpoint - distance
    - Sends error to actuator peer
-   - Sends status (water level, pump power, servo position) to HMI peer
+   - Sends status (level, pump, servo) to HMI
 */
 void controlTask(void *pvParameters) {
-  int32_t distance_cm = 0;
+  int32_t  distance_cm = 0;
   uint32_t local_count = 0;
 
   esp_now_data_t out_msg;
@@ -275,30 +266,28 @@ void controlTask(void *pvParameters) {
       Serial.printf("[CONTROL] Pump power: %ld %%, Servo: %ld deg\n",
                     (long)pump_power, (long)servo_deg);
 
-      // Send error to actuator
+      // Send error to actuator (if known)
       if (device_is_master && actuator_peer != nullptr) {
-        out_msg.count = local_count;
-        out_msg.data  = error;
-        out_msg.data2 = 0;
-        out_msg.data3 = 0;
-        out_msg.ready = true;
+        out_msg.count  = local_count;
+        out_msg.data   = error;       // error in cm
+        out_msg.data2  = 0;
+        out_msg.data3  = 0;
+        out_msg.ready  = true;
 
         if (!actuator_peer->send_message((const uint8_t *)&out_msg, sizeof(out_msg))) {
           Serial.println("[CONTROL] Failed to send error to actuator");
         } else {
           Serial.println("[CONTROL] Error sent to actuator");
         }
-      } else {
-        Serial.println("[CONTROL] Actuator peer not ready yet");
       }
 
-      // Send status to HMI: water level, pump power, servo position
+      // Send status to HMI (if known): data = water level, data2 = pump power, data3 = servo angle
       if (device_is_master && hmi_peer != nullptr) {
-        status_msg.count = local_count;
-        status_msg.data  = distance_cm;  // water level
-        status_msg.data2 = pump_power;   // fake pump power percent
-        status_msg.data3 = servo_deg;    // servo position in degrees
-        status_msg.ready = true;
+        status_msg.count  = local_count;
+        status_msg.data   = distance_cm;  // water level / distance
+        status_msg.data2  = pump_power;   // fake pump power percent
+        status_msg.data3  = servo_deg;    // servo position in degrees
+        status_msg.ready  = true;
 
         if (!hmi_peer->send_message((const uint8_t *)&status_msg, sizeof(status_msg))) {
           Serial.println("[CONTROL] Failed to send status to HMI");
@@ -379,8 +368,8 @@ void setup() {
   Serial.printf("  Channel: %d\n", ESPNOW_WIFI_CHANNEL);
 
   WiFi.macAddress(self_mac);
-  self_priority = 5;  // Master priority
-  current_setpoint_cm = DEFAULT_SETPOINT_CM;
+  self_priority        = 5;  // Master priority
+  current_setpoint_cm  = DEFAULT_SETPOINT_CM;
 
   Serial.printf("This device's priority: %lu\n", self_priority);
   Serial.printf("Initial control setpoint: %ld cm\n", (long)current_setpoint_cm);
@@ -433,6 +422,7 @@ void setup() {
 
 /* Main Loop */
 void loop() {
+  // ESP-NOW Master/Slave Decision Logic
   if (!master_decided) {
     if (!broadcast_peer.send_message((const uint8_t *)&new_msg, sizeof(new_msg))) {
       Serial.println("Failed to broadcast message");
