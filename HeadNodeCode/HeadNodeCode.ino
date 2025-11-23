@@ -24,6 +24,10 @@
          (data = distance_cm, data2 = pump_power, data3 = servo_angle_deg)
 
   Sensor and HMI do not send data unless polled, which avoids collisions.
+
+  This version uses TWO FreeRTOS tasks:
+    - pollingTask: sends MSG_POLL_HMI and MSG_POLL_SENSOR periodically
+    - controlTask: waits on sensorQueue for new distance and computes control
 */
 
 #include "ESP32_NOW.h"
@@ -42,7 +46,8 @@
 #define ESPNOW_WIFI_CHANNEL     4
 #define ESPNOW_PEER_COUNT       3      // HMI, Sensor, Actuator
 #define ESPNOW_DISC_INTERVAL_MS 200
-#define CONTROL_LOOP_PERIOD_MS  300
+#define CONTROL_LOOP_PERIOD_MS  300    // control loop rate (ms)
+#define POLL_LOOP_PERIOD_MS     300    // polling rate (ms) - can be same as control
 
 #define ESPNOW_EXAMPLE_PMK "pmk1234567890123"
 #define ESPNOW_EXAMPLE_LMK "lmk1234567890123"
@@ -89,12 +94,13 @@ uint32_t sent_msg_count     = 0;
 uint32_t recv_msg_count     = 0;
 esp_now_data_t new_msg;    // used during discovery
 
-// Keep a small window of last readings
+// Keep a small window of last readings (for debug / averaging)
 std::vector<int32_t> last_data(5, 0);
 
 /* FreeRTOS objects */
-QueueHandle_t sensorQueue      = nullptr; // carries distance readings to control task
-TaskHandle_t  controlTaskHandle = nullptr;
+QueueHandle_t sensorQueue        = nullptr; // carries distance readings to control task
+TaskHandle_t  controlTaskHandle  = nullptr;
+TaskHandle_t  pollingTaskHandle  = nullptr;
 
 /* Helper functions to derive fake pump and servo info from error */
 static const int32_t MAX_ERROR_FOR_PUMP = 100;  // clamp for pump and servo calculations
@@ -263,9 +269,9 @@ bool check_all_peers_ready() {
   return true;
 }
 
-/* FreeRTOS control task with polling */
-void controlTask(void *pvParameters) {
-  const TickType_t loopDelay = pdMS_TO_TICKS(CONTROL_LOOP_PERIOD_MS);
+/* FreeRTOS POLLING task */
+void pollingTask(void *pvParameters) {
+  const TickType_t loopDelay = pdMS_TO_TICKS(POLL_LOOP_PERIOD_MS);
 
   for (;;) {
     if (!master_decided || !device_is_master) {
@@ -273,7 +279,7 @@ void controlTask(void *pvParameters) {
       continue;
     }
 
-    // 1) Poll HMI for setpoint (non blocking, value will be used next cycle)
+    // 1) Poll HMI for setpoint (non-blocking, used asynchronously)
     if (hmi_peer != nullptr) {
       esp_now_data_t poll_hmi;
       memset(&poll_hmi, 0, sizeof(poll_hmi));
@@ -283,16 +289,13 @@ void controlTask(void *pvParameters) {
       poll_hmi.ready    = false;
 
       if (!hmi_peer->send_message((const uint8_t *)&poll_hmi, sizeof(poll_hmi))) {
-        Serial.println("[CONTROL] Failed to poll HMI");
+        Serial.println("[POLL] Failed to poll HMI");
       } else {
-        Serial.println("[CONTROL] Polled HMI for setpoint");
+        Serial.println("[POLL] Polled HMI for setpoint");
       }
     }
 
-    // 2) Poll sensor and wait for one reading
-    int32_t distance_cm   = 0;
-    bool    got_measurement = false;
-
+    // 2) Poll Sensor for distance (reply will be pushed into sensorQueue by onReceive)
     if (sensor_peer != nullptr) {
       esp_now_data_t poll_sensor;
       memset(&poll_sensor, 0, sizeof(poll_sensor));
@@ -302,72 +305,89 @@ void controlTask(void *pvParameters) {
       poll_sensor.ready    = false;
 
       if (!sensor_peer->send_message((const uint8_t *)&poll_sensor, sizeof(poll_sensor))) {
-        Serial.println("[CONTROL] Failed to poll sensor");
+        Serial.println("[POLL] Failed to poll sensor");
       } else {
-        Serial.println("[CONTROL] Polled sensor for distance");
-        if (xQueueReceive(sensorQueue, &distance_cm, pdMS_TO_TICKS(200)) == pdTRUE) {
-          got_measurement = true;
-        } else {
-          Serial.println("[CONTROL] Timeout waiting for sensor data");
-        }
-      }
-    }
-
-    if (got_measurement) {
-      sensorData = distance_cm;
-
-      int32_t setpoint_cm = current_setpoint_cm;
-      int32_t error_cm    = setpoint_cm - distance_cm;
-      lastError           = error_cm;
-
-      int32_t pump_power = compute_pump_power_percent(error_cm);
-      int32_t servo_deg  = compute_servo_position_deg(error_cm);
-
-      Serial.printf("[CONTROL] Setpoint: %ld cm, Measured: %ld cm, Error: %ld cm\n",
-                    (long)setpoint_cm, (long)distance_cm, (long)error_cm);
-      Serial.printf("[CONTROL] Pump power: %ld %%, Servo: %ld deg\n",
-                    (long)pump_power, (long)servo_deg);
-
-      // 3) Send control command to actuator
-      if (actuator_peer != nullptr) {
-        esp_now_data_t cmd;
-        memset(&cmd, 0, sizeof(cmd));
-        cmd.msg_type = MSG_CONTROL_COMMAND;
-        cmd.priority = self_priority;
-        cmd.count    = ++sent_msg_count;
-        cmd.data     = error_cm;
-        cmd.data2    = pump_power;
-        cmd.data3    = servo_deg;
-        cmd.ready    = true;
-
-        if (!actuator_peer->send_message((const uint8_t *)&cmd, sizeof(cmd))) {
-          Serial.println("[CONTROL] Failed to send control command to actuator");
-        } else {
-          Serial.println("[CONTROL] Control command sent to actuator");
-        }
-      }
-
-      // 4) Send status to HMI
-      if (hmi_peer != nullptr) {
-        esp_now_data_t status;
-        memset(&status, 0, sizeof(status));
-        status.msg_type = MSG_CONTROL_STATUS;
-        status.priority = self_priority;
-        status.count    = ++sent_msg_count;
-        status.data     = distance_cm;
-        status.data2    = pump_power;
-        status.data3    = servo_deg;
-        status.ready    = true;
-
-        if (!hmi_peer->send_message((const uint8_t *)&status, sizeof(status))) {
-          Serial.println("[CONTROL] Failed to send status to HMI");
-        } else {
-          Serial.println("[CONTROL] Status sent to HMI");
-        }
+        Serial.println("[POLL] Polled sensor for distance");
       }
     }
 
     vTaskDelay(loopDelay);
+  }
+}
+
+/* FreeRTOS CONTROL task
+   - Waits for new distance values from sensorQueue
+   - Uses latest current_setpoint_cm (updated by MSG_HMI_SETPOINT)
+   - Computes error, pump power, servo angle
+   - Sends MSG_CONTROL_COMMAND to actuator and MSG_CONTROL_STATUS to HMI
+*/
+void controlTask(void *pvParameters) {
+  for (;;) {
+    if (!master_decided || !device_is_master) {
+      vTaskDelay(pdMS_TO_TICKS(CONTROL_LOOP_PERIOD_MS));
+      continue;
+    }
+
+    int32_t distance_cm = 0;
+
+    // Block until we get a new measurement
+    if (xQueueReceive(sensorQueue, &distance_cm, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+
+    sensorData = distance_cm;
+
+    int32_t setpoint_cm = current_setpoint_cm;
+    int32_t error_cm    = setpoint_cm - distance_cm;
+    lastError           = error_cm;
+
+    int32_t pump_power = compute_pump_power_percent(error_cm);
+    int32_t servo_deg  = compute_servo_position_deg(error_cm);
+
+    Serial.printf("[CONTROL] Setpoint: %ld cm, Measured: %ld cm, Error: %ld cm\n",
+                  (long)setpoint_cm, (long)distance_cm, (long)error_cm);
+    Serial.printf("[CONTROL] Pump power: %ld %%, Servo: %ld deg\n",
+                  (long)pump_power, (long)servo_deg);
+
+    // 1) Send control command to actuator
+    if (actuator_peer != nullptr) {
+      esp_now_data_t cmd;
+      memset(&cmd, 0, sizeof(cmd));
+      cmd.msg_type = MSG_CONTROL_COMMAND;
+      cmd.priority = self_priority;
+      cmd.count    = ++sent_msg_count;
+      cmd.data     = error_cm;
+      cmd.data2    = pump_power;
+      cmd.data3    = servo_deg;
+      cmd.ready    = true;
+
+      if (!actuator_peer->send_message((const uint8_t *)&cmd, sizeof(cmd))) {
+        Serial.println("[CONTROL] Failed to send control command to actuator");
+      } else {
+        Serial.println("[CONTROL] Control command sent to actuator");
+      }
+    }
+
+    // 2) Send status to HMI
+    if (hmi_peer != nullptr) {
+      esp_now_data_t status;
+      memset(&status, 0, sizeof(status));
+      status.msg_type = MSG_CONTROL_STATUS;
+      status.priority = self_priority;
+      status.count    = ++sent_msg_count;
+      status.data     = distance_cm;
+      status.data2    = pump_power;
+      status.data3    = servo_deg;
+      status.ready    = true;
+
+      if (!hmi_peer->send_message((const uint8_t *)&status, sizeof(status))) {
+        Serial.println("[CONTROL] Failed to send status to HMI");
+      } else {
+        Serial.println("[CONTROL] Status sent to HMI");
+      }
+    }
+
+    // Control loop naturally runs every time we get a new sensor reading
   }
 }
 
@@ -440,7 +460,7 @@ void setup() {
     delay(100);
   }
 
-  Serial.println("\n=== ESP-NOW HEAD NODE (Master with polling) ===");
+  Serial.println("\n=== ESP-NOW HEAD NODE (Master with polling + control tasks) ===");
   Serial.println("Wi-Fi parameters:");
   Serial.println("  Mode: STA");
   Serial.println("  MAC Address: " + WiFi.macAddress());
@@ -472,13 +492,14 @@ void setup() {
   new_msg.priority = self_priority;
   new_msg.ready    = false;
 
-  // Create FreeRTOS queue and task
+  // Create FreeRTOS queue
   sensorQueue = xQueueCreate(5, sizeof(int32_t));
   if (sensorQueue == nullptr) {
     Serial.println("Failed to create sensorQueue");
     fail_reboot();
   }
 
+  // Create CONTROL task
   BaseType_t created = xTaskCreatePinnedToCore(
     controlTask,
     "ControlTask",
@@ -491,6 +512,22 @@ void setup() {
 
   if (created != pdPASS) {
     Serial.println("Failed to create control task");
+    fail_reboot();
+  }
+
+  // Create POLLING task
+  created = xTaskCreatePinnedToCore(
+    pollingTask,
+    "PollingTask",
+    4096,
+    nullptr,
+    1,
+    &pollingTaskHandle,
+    1  // run on core 1 (same core is fine here)
+  );
+
+  if (created != pdPASS) {
+    Serial.println("Failed to create polling task");
     fail_reboot();
   }
 
