@@ -542,6 +542,15 @@ void register_new_peer(const esp_now_recv_info_t *info,
                        const uint8_t *data,
                        int len,
                        void *arg) {
+  // Get own MAC address
+  uint8_t own_mac[6];
+  WiFi.macAddress(own_mac);
+  
+  // Ignore messages from self
+  if (memcmp(info->src_addr, own_mac, 6) == 0) {
+    return;  // Ignore own broadcast
+  }
+
   esp_now_data_t *msg = (esp_now_data_t *)data;
   int priority = (int)msg->priority;
 
@@ -578,6 +587,7 @@ void register_new_peer(const esp_now_recv_info_t *info,
     new_msg.ready = true;
   }
 }
+
 
 /* Setup */
 void setup() {
