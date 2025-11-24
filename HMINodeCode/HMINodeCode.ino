@@ -59,8 +59,8 @@ typedef struct {
 #define DT_PIN   22
 #define SW_PIN   19
 
-#define MAX_CM    24
-#define MAX_SERVO 90  // servo disturbance range
+#define MAX_MM    240  // Changed from MAX_CM 24
+#define MAX_SERVO 90   // servo disturbance range
 
 Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 
@@ -75,7 +75,7 @@ enum EditMode {
 };
 
 /* HMI state */
-int setpoint          = 12;
+int setpoint          = 120;  // Changed from 12 cm to 120 mm
 int setpointPercent   = 0;
 int waterLevel        = 0;
 int waterLevelPercent = 0;
@@ -123,7 +123,6 @@ esp_now_data_t new_msg;
 
 /* Hardcoded HEAD MAC address */
 static uint8_t HEAD_MAC[] = {0x24, 0xDC, 0xC3, 0x45, 0x88, 0x84};
-
 
 /* Peer class */
 class ESP_NOW_Network_Peer : public ESP_NOW_Peer {
@@ -176,13 +175,13 @@ public:
     switch (msg->msg_type) {
       case MSG_CONTROL_STATUS:
         Serial.println("[HMI_RX] Processing CONTROL_STATUS");
-        // data  = waterLevel
+        // data  = waterLevel (in mm)
         // data2 = pumpPower
         // data3 = servoPosition (optional)
         waterLevel = (int)msg->data;
         pumpPower  = (int)msg->data2;
         // Optional feedback of servo, but we keep local user value as source of truth
-        Serial.printf("Status from HEAD " MACSTR ": Level=%d cm, Pump=%d %%\n",
+        Serial.printf("Status from HEAD " MACSTR ": Level=%d mm, Pump=%d %%\n",
                       MAC2STR(addr()), waterLevel, pumpPower);
         break;
 
@@ -283,8 +282,9 @@ bool check_all_peers_ready() {
   return true;
 }
 
-int calculateVolume(int level_cm) {
-  const float TANK_RADIUS = 10.75f;
+int calculateVolume(int level_mm) {
+  const float TANK_RADIUS = 10.75f;  // cm
+  float level_cm = level_mm / 10.0f;  // Convert mm to cm for volume calculation
   float volume_ml = 3.14159f * TANK_RADIUS * TANK_RADIUS * level_cm;
   return (int)volume_ml;
 }
@@ -351,7 +351,7 @@ int getCurrentValue() {
 void setCurrentValue(int value) {
   switch (currentMode) {
     case MODE_SETPOINT:
-      setpoint = constrain(value, 0, MAX_CM);
+      setpoint = constrain(value, 0, MAX_MM);  // Changed from MAX_CM
       break;
     case MODE_P:
       Kp_x10 = constrain(value, 0, 1000);
@@ -373,7 +373,7 @@ void setCurrentValue(int value) {
 /* UI update sections */
 void updateSetpointDisplay() {
   if (setpoint != lastSetpoint) {
-    setpointPercent = (setpoint * 100) / MAX_CM;
+    setpointPercent = (setpoint * 100) / MAX_MM;  // Changed from MAX_CM
 
     tft.fillRect(20, 55, 200, 30, ST77XX_BLACK);
 
@@ -385,7 +385,7 @@ void updateSetpointDisplay() {
     tft.print(setpoint);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_WHITE);
-    tft.print(" cm");
+    tft.print(" mm");  // Changed from " cm"
 
     tft.setTextSize(3);
     tft.setTextColor(ST77XX_YELLOW);
@@ -437,7 +437,7 @@ void updatePIDDisplay() {
 
 void updateWaterLevelDisplay() {
   if (waterLevel != lastWaterLevel) {
-    waterLevelPercent = (waterLevel * 100) / MAX_CM;
+    waterLevelPercent = (waterLevel * 100) / MAX_MM;  // Changed from MAX_CM
     volume = calculateVolume(waterLevel);
 
     // Clear entire area
@@ -450,7 +450,7 @@ void updateWaterLevelDisplay() {
     tft.print(waterLevel);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_WHITE);
-    tft.print("cm ");
+    tft.print("mm ");  // Changed from "cm "
     
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_MAGENTA);
@@ -594,7 +594,6 @@ void register_new_peer(const esp_now_recv_info_t *info,
   }
 }
 
-
 /* Setup */
 void setup() {
   pinMode(BL_PIN, OUTPUT);
@@ -661,7 +660,6 @@ void setup() {
   Serial.println("HMI setup complete");
 }
 
-/* Loop */
 /* Loop */
 void loop() {
   static unsigned long lastCommTime = 0;

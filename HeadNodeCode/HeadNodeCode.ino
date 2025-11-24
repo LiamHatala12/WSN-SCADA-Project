@@ -16,13 +16,13 @@
 
     2) Head polls Sensor for distance:
        - Head -> Sensor: MSG_POLL_SENSOR
-       - Sensor -> Head: MSG_SENSOR_DATA (data = distance_cm)
+       - Sensor -> Head: MSG_SENSOR_DATA (data = distance_mm)
 
        Head converts:
-         water_level_cm = MAX_WATER_LEVEL_CM - distance_cm
+         water_level_mm = MAX_WATER_LEVEL_MM - distance_mm
 
-    3) Head runs PID on water_level_cm:
-         error = setpoint_cm - water_level_cm
+    3) Head runs PID on water_level_mm:
+         error = setpoint_mm - water_level_mm
 
        Then:
        - Head -> Pump node:  MSG_CONTROL_COMMAND
@@ -30,7 +30,7 @@
        - Head -> Servo node: MSG_SERVO_COMMAND
          (data = servo_disturbance_deg)
        - Head -> HMI:        MSG_CONTROL_STATUS
-         (data = raw distance_cm, data2 = pump_power, data3 = servo_deg)
+         (data = water_level_mm, data2 = pump_power, data3 = servo_deg)
 
   Sensor, HMI, Servo, Pump do not send data unless polled or commanded, which avoids collisions.
 */
@@ -50,11 +50,11 @@
 /* Definitions */
 #define ESPNOW_WIFI_IFACE       WIFI_IF_STA
 #define ESPNOW_WIFI_CHANNEL     4
-#define ESPNOW_PEER_COUNT       4      // HMI, Sensor, Servo, Pump
+#define ESPNOW_PEER_COUNT       3      // HMI, Sensor,  (servo ignored), Pump
 #define ESPNOW_DISC_INTERVAL_MS 200
 #define CONTROL_LOOP_PERIOD_MS  300    // control loop rate (ms)
 #define POLL_LOOP_PERIOD_MS     300    // polling rate (ms)
-#define MAX_WATER_LEVEL_CM      26     // sensor mounting height from tank bottom
+#define MAX_WATER_LEVEL_MM      260    // sensor mounting height from tank bottom (mm)
 
 #define ESPNOW_EXAMPLE_PMK "pmk1234567890123"
 #define ESPNOW_EXAMPLE_LMK "lmk1234567890123"
@@ -93,10 +93,10 @@ typedef struct {
 } __attribute__((packed)) esp_now_data_t;
 
 /* PID state (protected by mutex) */
-volatile int32_t current_setpoint_cm = 12;   // default setpoint
-volatile int32_t current_Kp_x10      = 20;   // Kp = 2.0
-volatile int32_t current_Ki_x10      = 5;    // Ki = 0.5
-volatile int32_t current_Kd_x10      = 10;   // Kd = 1.0
+volatile int32_t current_setpoint_mm = 120;   // default setpoint (mm)
+volatile int32_t current_Kp_x10      = 20;    // Kp = 2.0
+volatile int32_t current_Ki_x10      = 5;     // Ki = 0.5
+volatile int32_t current_Kd_x10      = 10;    // Kd = 1.0
 volatile int32_t current_servo_setpoint_deg = 0; // disturbance from HMI
 
 static float lastErrorF        = 0.0f;
@@ -105,7 +105,7 @@ static uint32_t lastPidTime_ms = 0;
 
 /* Global control variables */
 volatile int32_t sensorData    = 0;   // we store water level here
-volatile int32_t lastError     = 0;   // cm
+volatile int32_t lastError     = 0;   // mm
 
 uint32_t self_priority      = PRIORITY_HEAD;
 uint8_t  current_peer_count = 0;
@@ -140,9 +140,25 @@ static uint8_t SERVO_MAC[]  = {0xb0, 0xa7, 0x32, 0x2b, 0x0f, 0x20};
 static uint8_t PUMP_MAC[]   = {0x24, 0xdc, 0xc3, 0x45, 0xf3, 0x50};
 
 int32_t compute_pump_power_percent_from_output(float u) {
-  float mag = fabsf(u);
-  if (mag > 100.0f) mag = 100.0f;
-  return (int32_t)mag;
+  // Pump operates from 12V to 10V (83.3% to 100% duty cycle)
+  // Below 10V (83.3% duty), pump turns off
+  
+  if (u <= 0.0f) {
+    return 0;  // Water level at/above setpoint, pump OFF
+  }
+  
+  // Map PID output to usable pump range
+  // u: 0-100 (PID output range)
+  // Pump needs: 83-100% duty cycle for 10V-12V operation
+  
+  float pump_power = u;
+  if (pump_power > 100.0f) pump_power = 100.0f;
+  
+  // Scale to operating range: 0-100% → 83-100% duty
+  // This gives us finer control over the 10V-12V range
+  float scaled_power = 83.0f + (pump_power * 0.17f);  // 83% + (0-17%)
+  
+  return (int32_t)scaled_power;
 }
 
 /* Peer class */
@@ -216,15 +232,15 @@ public:
     switch (msg->msg_type) {
       case MSG_SENSOR_DATA:
         if (role == PEER_ROLE_SENSOR) {
-          int32_t distance_cm = msg->data;
+          int32_t distance_mm = msg->data;
 
           Serial.printf("Received SENSOR_DATA from " MACSTR "\n", MAC2STR(addr()));
           Serial.printf("  Count: %lu\n", msg->count);
-          Serial.printf("  Distance (raw): %ld cm\n", (long)distance_cm);
+          Serial.printf("  Distance (raw): %ld mm\n", (long)distance_mm);
 
           // Queue is already thread-safe
           if (sensorQueue != nullptr) {
-            xQueueSend(sensorQueue, &distance_cm, 0);
+            xQueueSend(sensorQueue, &distance_mm, 0);
           }
         }
         break;
@@ -238,14 +254,14 @@ public:
 
           // Protected write to PID parameters
           if (xSemaphoreTake(pidParamsMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            current_setpoint_cm = sp;
+            current_setpoint_mm = sp;
             current_Kp_x10      = kp_x10;
             current_Ki_x10      = ki_x10;
             current_Kd_x10      = kd_x10;
             xSemaphoreGive(pidParamsMutex);
 
             Serial.printf("HMI_SETPOINT from HMI " MACSTR "\n", MAC2STR(addr()));
-            Serial.printf("  SP = %ld cm, Kp_x10 = %ld, Ki_x10 = %ld, Kd_x10 = %ld\n",
+            Serial.printf("  SP = %ld mm, Kp_x10 = %ld, Ki_x10 = %ld, Kd_x10 = %ld\n",
                           (long)sp, (long)kp_x10, (long)ki_x10, (long)kd_x10);
           } else {
             Serial.println("[WARNING] Failed to acquire PID mutex in HMI_SETPOINT");
@@ -410,30 +426,30 @@ void controlTask(void *pvParameters) {
       continue;
     }
 
-    int32_t distance_cm = 0;
+    int32_t distance_mm = 0;
 
     // Wait for sensor data with timeout (queue is already thread-safe)
-    if (xQueueReceive(sensorQueue, &distance_cm, pdMS_TO_TICKS(500)) != pdTRUE) {
+    if (xQueueReceive(sensorQueue, &distance_mm, pdMS_TO_TICKS(500)) != pdTRUE) {
       Serial.println("[CONTROL] WARNING: No sensor data received (timeout)");
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
 
     // Convert raw distance to water level
-    int32_t water_level_cm = MAX_WATER_LEVEL_CM - distance_cm;
-    if (water_level_cm < 0) {
-      Serial.printf("[CONTROL] WARNING: Negative water level (%ld cm), clamping to 0\n", 
-                    (long)water_level_cm);
-      water_level_cm = 0;
+    int32_t water_level_mm = MAX_WATER_LEVEL_MM - distance_mm;
+    if (water_level_mm < 0) {
+      Serial.printf("[CONTROL] WARNING: Negative water level (%ld mm), clamping to 0\n", 
+                    (long)water_level_mm);
+      water_level_mm = 0;
     }
-    if (water_level_cm > MAX_WATER_LEVEL_CM) water_level_cm = MAX_WATER_LEVEL_CM;
+    if (water_level_mm > MAX_WATER_LEVEL_MM) water_level_mm = MAX_WATER_LEVEL_MM;
 
-    sensorData = water_level_cm;
+    sensorData = water_level_mm;
 
     // Protected read of PID parameters
     int32_t sp_local, kp_local, ki_local, kd_local, servo_local;
     if (xSemaphoreTake(pidParamsMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      sp_local = current_setpoint_cm;
+      sp_local = current_setpoint_mm;
       kp_local = current_Kp_x10;
       ki_local = current_Ki_x10;
       kd_local = current_Kd_x10;
@@ -446,7 +462,7 @@ void controlTask(void *pvParameters) {
     }
 
     float setpointF = (float)sp_local;
-    float pvF       = (float)water_level_cm;
+    float pvF       = (float)water_level_mm;
 
     float Kp = (float)kp_local / 10.0f;
     float Ki = (float)ki_local / 10.0f;
@@ -474,7 +490,7 @@ void controlTask(void *pvParameters) {
     lastErrorF = error;
     lastError  = (int32_t)error;
 
-    Serial.printf("[PID] SP: %.2f cm, Water level: %.2f cm, Error: %.2f cm\n",
+    Serial.printf("[PID] SP: %.2f mm, Water level: %.2f mm, Error: %.2f mm\n",
                   setpointF, pvF, error);
     Serial.printf("[PID] Kp: %.2f, Ki: %.2f, Kd: %.2f, u: %.2f\n",
                   Kp, Ki, Kd, output);
@@ -539,7 +555,7 @@ void controlTask(void *pvParameters) {
         xSemaphoreGive(msgCountMutex);
       }
       
-      status.data     = water_level_cm;
+      status.data     = water_level_mm;
       status.data2    = pump_power;
       status.data3    = servo_local;
       status.ready    = true;
@@ -651,7 +667,7 @@ void setup() {
   WiFi.macAddress(self_mac);
   self_priority = PRIORITY_HEAD;
   Serial.printf("This device priority: %lu\n", self_priority);
-  Serial.printf("Initial setpoint: %ld cm\n", (long)current_setpoint_cm);
+  Serial.printf("Initial setpoint: %ld mm\n", (long)current_setpoint_mm);
 
   if (!ESP_NOW.begin((const uint8_t *)ESPNOW_EXAMPLE_PMK)) {
     Serial.println("Failed to initialize ESP-NOW");

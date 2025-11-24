@@ -57,7 +57,7 @@ const int pingPin = 23;
 static uint8_t HEAD_MAC[] = {0x24, 0xDC, 0xC3, 0x45, 0x88, 0x84};
 
 
-long readUltrasonicCm() {
+long readUltrasonicMm() {
   long duration;
   pinMode(pingPin, OUTPUT);
   digitalWrite(pingPin, LOW);
@@ -68,7 +68,7 @@ long readUltrasonicCm() {
   pinMode(pingPin, INPUT);
   duration = pulseIn(pingPin, HIGH, 30000);
   if (duration == 0) return 0;
-  return duration / 29 / 2;
+  return duration * 10 / 29 / 2;  // Convert to mm instead of cm
 }
 
 class ESP_NOW_Network_Peer : public ESP_NOW_Peer {
@@ -124,8 +124,8 @@ public:
     if (msg->msg_type == MSG_POLL_SENSOR) {
       Serial.println("[SENSOR] *** Received POLL_SENSOR from HEAD ***");
       
-      long dist = readUltrasonicCm();
-      Serial.printf("[SENSOR] Ultrasonic reading: %ld cm (distance to water surface)\n", dist);
+      long dist = readUltrasonicMm();
+      Serial.printf("[SENSOR] Ultrasonic reading: %ld mm (distance to water surface)\n", dist);
       
       esp_now_data_t reply;
       memset(&reply, 0, sizeof(reply));
@@ -138,7 +138,7 @@ public:
       if (!send_message((const uint8_t *)&reply, sizeof(reply))) {
         Serial.println("[SENSOR] *** FAILED to send SENSOR_DATA ***");
       } else {
-        Serial.printf("[SENSOR] *** Sent SENSOR_DATA: %ld cm to HEAD ***\n", dist);
+        Serial.printf("[SENSOR] *** Sent SENSOR_DATA: %ld mm to HEAD ***\n", dist);
       }
     }
   }
@@ -238,7 +238,6 @@ void register_new_peer(const esp_now_recv_info_t *info,
 
   Serial.printf("REGISTER_PEER: Current peer count: %d/%d\n", current_peer_count, ESPNOW_PEER_COUNT);
 }
-
 
 /* Setup */
 void setup() {
