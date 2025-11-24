@@ -68,6 +68,10 @@ bool     master_decided     = false;
 uint32_t sent_msg_count     = 0;
 esp_now_data_t new_msg;
 
+/* Hardcoded HEAD MAC address */
+static uint8_t HEAD_MAC[] = {0x24, 0xDC, 0xC3, 0x45, 0x88, 0x84};
+
+
 class ESP_NOW_Network_Peer : public ESP_NOW_Peer {
 public:
   uint32_t priority;
@@ -160,17 +164,29 @@ void register_new_peer(const esp_now_recv_info_t *info,
                        int len,
                        void *arg) {
   esp_now_data_t *msg = (esp_now_data_t *)data;
-  int priority = (int)msg->priority;
+  int priority        = (int)msg->priority;
 
   if ((uint32_t)priority == self_priority) {
-    Serial.println("ERROR: duplicate priority");
+    Serial.println("ERROR duplicate priority");
     fail_reboot();
   }
 
-  if (current_peer_count >= ESPNOW_PEER_COUNT) return;
+  if (current_peer_count >= ESPNOW_PEER_COUNT) {
+    return;
+  }
 
-  Serial.printf("New peer: " MACSTR " (priority %d)\n",
-                MAC2STR(info->src_addr), priority);
+  // Validate this is the HEAD node
+  if (memcmp(info->src_addr, HEAD_MAC, 6) != 0) {
+    Serial.println("ERROR: Unknown MAC - not the expected HEAD");
+    return;
+  }
+  
+  if (priority != PRIORITY_HEAD) {
+    Serial.println("ERROR: HEAD has wrong priority");
+    return;
+  }
+
+  Serial.printf("New peer: " MACSTR " priority %d\n", MAC2STR(info->src_addr), priority);
 
   ESP_NOW_Network_Peer *new_peer =
     new (std::nothrow) ESP_NOW_Network_Peer(info->src_addr, priority);
@@ -184,17 +200,16 @@ void register_new_peer(const esp_now_recv_info_t *info,
   peers.push_back(new_peer);
   current_peer_count++;
 
-  if ((uint32_t)priority > self_priority) {
-    new_peer->peer_is_master = true;
-    master_peer = new_peer;
-    Serial.println("Peer identified as HEAD master");
-  }
+  new_peer->peer_is_master = true;
+  master_peer = new_peer;
+  Serial.println("Peer identified as HEAD (master)");
 
   if (current_peer_count == ESPNOW_PEER_COUNT) {
     Serial.println("All peers found");
     new_msg.ready = true;
   }
 }
+
 
 /* Setup pump hardware */
 void setupPump() {

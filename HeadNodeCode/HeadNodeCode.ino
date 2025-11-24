@@ -151,6 +151,13 @@ static const float  DT_SEC_DEFAULT  = 0.3f;
 static const float  MAX_WINDUP      = 200.0f;
 
 
+/* Hardcoded MAC addresses for each node */
+static uint8_t HMI_MAC[]    = {0x1c, 0x69, 0x20, 0x92, 0x60, 0x30};
+static uint8_t SENSOR_MAC[] = {0xb0, 0xa7, 0x32, 0x2b, 0x6c, 0xd8};
+static uint8_t SERVO_MAC[]  = {0xb0, 0xa7, 0x32, 0x2b, 0x0f, 0x20};
+static uint8_t PUMP_MAC[]   = {0x24, 0xdc, 0xc3, 0x45, 0xf3, 0x50};
+
+
 int32_t compute_pump_power_percent_from_output(float u) {
   float mag = fabsf(u);
   if (mag > 100.0f) mag = 100.0f;
@@ -524,21 +531,40 @@ void register_new_peer(const esp_now_recv_info_t *info,
   esp_now_data_t *msg = (esp_now_data_t *)data;
   int priority        = (int)msg->priority;
 
-
   if ((uint32_t)priority == self_priority) {
     Serial.println("ERROR! Device has the same priority as this device. Unsupported behavior.");
     fail_reboot();
   }
 
-
   if (current_peer_count < ESPNOW_PEER_COUNT) {
     Serial.printf("New peer found: " MACSTR " with priority %d\n",
                   MAC2STR(info->src_addr), priority);
 
+    // Validate MAC address matches expected priority
+    bool valid_peer = false;
+    ESP_NOW_Network_Peer::PeerRole assigned_role = ESP_NOW_Network_Peer::PEER_ROLE_UNKNOWN;
+    
+    if (memcmp(info->src_addr, HMI_MAC, 6) == 0 && priority == PRIORITY_HMI) {
+      assigned_role = ESP_NOW_Network_Peer::PEER_ROLE_HMI;
+      valid_peer = true;
+    } else if (memcmp(info->src_addr, SENSOR_MAC, 6) == 0 && priority == PRIORITY_SENSOR) {
+      assigned_role = ESP_NOW_Network_Peer::PEER_ROLE_SENSOR;
+      valid_peer = true;
+    } else if (memcmp(info->src_addr, SERVO_MAC, 6) == 0 && priority == PRIORITY_SERVO) {
+      assigned_role = ESP_NOW_Network_Peer::PEER_ROLE_SERVO;
+      valid_peer = true;
+    } else if (memcmp(info->src_addr, PUMP_MAC, 6) == 0 && priority == PRIORITY_PUMP) {
+      assigned_role = ESP_NOW_Network_Peer::PEER_ROLE_PUMP;
+      valid_peer = true;
+    }
+
+    if (!valid_peer) {
+      Serial.println("ERROR! Unknown or mismatched MAC/priority combination. Ignoring peer.");
+      return;
+    }
 
     ESP_NOW_Network_Peer *new_peer =
       new (std::nothrow) ESP_NOW_Network_Peer(info->src_addr, priority);
-
 
     if (new_peer == nullptr || !new_peer->begin()) {
       Serial.println("Failed to create or register the new peer");
@@ -546,34 +572,25 @@ void register_new_peer(const esp_now_recv_info_t *info,
       return;
     }
 
-
-    if ((uint32_t)priority < self_priority) {
-      if (priority == PRIORITY_SENSOR) {
-        new_peer->role = ESP_NOW_Network_Peer::PEER_ROLE_SENSOR;
-        sensor_peer    = new_peer;
-        Serial.println("Peer assigned role: SENSOR");
-      } else if (priority == PRIORITY_SERVO) {
-        new_peer->role = ESP_NOW_Network_Peer::PEER_ROLE_SERVO;
-        servo_peer     = new_peer;
-        Serial.println("Peer assigned role: SERVO");
-      } else if (priority == PRIORITY_PUMP) {
-        new_peer->role = ESP_NOW_Network_Peer::PEER_ROLE_PUMP;
-        pump_peer      = new_peer;
-        Serial.println("Peer assigned role: PUMP");
-      } else if (priority == PRIORITY_HMI) {
-        new_peer->role = ESP_NOW_Network_Peer::PEER_ROLE_HMI;
-        hmi_peer       = new_peer;
-        Serial.println("Peer assigned role: HMI");
-      } else {
-        new_peer->role = ESP_NOW_Network_Peer::PEER_ROLE_UNKNOWN;
-        Serial.println("Peer assigned role: UNKNOWWWN");
-      }
+    new_peer->role = assigned_role;
+    
+    // Assign to specific peer pointers
+    if (assigned_role == ESP_NOW_Network_Peer::PEER_ROLE_HMI) {
+      hmi_peer = new_peer;
+      Serial.println("Peer assigned role: HMI");
+    } else if (assigned_role == ESP_NOW_Network_Peer::PEER_ROLE_SENSOR) {
+      sensor_peer = new_peer;
+      Serial.println("Peer assigned role: SENSOR");
+    } else if (assigned_role == ESP_NOW_Network_Peer::PEER_ROLE_SERVO) {
+      servo_peer = new_peer;
+      Serial.println("Peer assigned role: SERVO");
+    } else if (assigned_role == ESP_NOW_Network_Peer::PEER_ROLE_PUMP) {
+      pump_peer = new_peer;
+      Serial.println("Peer assigned role: PUMP");
     }
-
 
     peers.push_back(new_peer);
     current_peer_count++;
-
 
     if (current_peer_count == ESPNOW_PEER_COUNT) {
       Serial.println("All peers have been found");

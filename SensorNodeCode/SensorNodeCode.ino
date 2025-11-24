@@ -53,6 +53,10 @@ typedef struct {
 /* Ultrasonic sensor */
 const int pingPin = 23;
 
+/* Hardcoded HEAD MAC address */
+static uint8_t HEAD_MAC[] = {0x24, 0xDC, 0xC3, 0x45, 0x88, 0x84};
+
+
 long readUltrasonicCm() {
   long duration;
   pinMode(pingPin, OUTPUT);
@@ -185,18 +189,29 @@ void register_new_peer(const esp_now_recv_info_t *info,
                        int len,
                        void *arg) {
   esp_now_data_t *msg = (esp_now_data_t *)data;
-  int priority = (int)msg->priority;
+  int priority        = (int)msg->priority;
 
-  Serial.printf("\n[REGISTER_PEER] *** New peer detected: " MACSTR " ***\n", MAC2STR(info->src_addr));
-  Serial.printf("[REGISTER_PEER] Priority: %d | Ready: %d\n", priority, msg->ready);
+  Serial.printf("REGISTER_PEER: New peer detected: " MACSTR "\n", MAC2STR(info->src_addr));
+  Serial.printf("REGISTER_PEER: Priority %d, Ready %d\n", priority, msg->ready);
 
   if ((uint32_t)priority == self_priority) {
-    Serial.println("[REGISTER_PEER] ERROR: duplicate priority");
+    Serial.println("REGISTER_PEER: ERROR duplicate priority");
     fail_reboot();
   }
 
   if (current_peer_count >= ESPNOW_PEER_COUNT) {
-    Serial.println("[REGISTER_PEER] Already have all expected peers - ignoring");
+    Serial.println("REGISTER_PEER: Already have all expected peers - ignoring");
+    return;
+  }
+
+  // Validate this is the HEAD node
+  if (memcmp(info->src_addr, HEAD_MAC, 6) != 0) {
+    Serial.println("REGISTER_PEER: ERROR - Unknown MAC, not the expected HEAD");
+    return;
+  }
+  
+  if (priority != PRIORITY_HEAD) {
+    Serial.println("REGISTER_PEER: ERROR - HEAD has wrong priority");
     return;
   }
 
@@ -204,7 +219,7 @@ void register_new_peer(const esp_now_recv_info_t *info,
     new (std::nothrow) ESP_NOW_Network_Peer(info->src_addr, priority);
 
   if (new_peer == nullptr || !new_peer->begin()) {
-    Serial.println("[REGISTER_PEER] *** FAILED to register peer ***");
+    Serial.println("REGISTER_PEER: FAILED to register peer");
     delete new_peer;
     return;
   }
@@ -212,19 +227,18 @@ void register_new_peer(const esp_now_recv_info_t *info,
   peers.push_back(new_peer);
   current_peer_count++;
 
-  if ((uint32_t)priority > self_priority) {
-    new_peer->peer_is_master = true;
-    master_peer = new_peer;
-    Serial.println("[REGISTER_PEER] *** Peer identified as HEAD master ***");
-  }
+  new_peer->peer_is_master = true;
+  master_peer = new_peer;
+  Serial.println("REGISTER_PEER: Peer identified as HEAD (master)");
 
   if (current_peer_count == ESPNOW_PEER_COUNT) {
-    Serial.println("[REGISTER_PEER] *** All peers found! Setting ready flag ***");
+    Serial.println("REGISTER_PEER: All peers found! Setting ready flag");
     new_msg.ready = true;
   }
 
-  Serial.printf("[REGISTER_PEER] Current peer count: %d/%d\n\n", current_peer_count, ESPNOW_PEER_COUNT);
+  Serial.printf("REGISTER_PEER: Current peer count: %d/%d\n", current_peer_count, ESPNOW_PEER_COUNT);
 }
+
 
 /* Setup */
 void setup() {
