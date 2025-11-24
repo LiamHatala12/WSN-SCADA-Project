@@ -148,8 +148,7 @@ public:
   }
 
   void onReceive(const uint8_t *data, size_t len, bool broadcast) {
-    Serial.printf("[HMI_RX] len=%d, broadcast=%d\n", len, broadcast);
-    
+    Serial.printf("[RX] Message received! len=%d, broadcast=%d\n", len, broadcast);    
     esp_now_data_t *msg = (esp_now_data_t *)data;
 
     if (!peer_ready && msg->ready) {
