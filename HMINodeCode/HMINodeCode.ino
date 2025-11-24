@@ -440,40 +440,34 @@ void updateWaterLevelDisplay() {
     waterLevelPercent = (waterLevel * 100) / MAX_CM;
     volume = calculateVolume(waterLevel);
 
-    tft.fillRect(20, 175, 200, 35, ST77XX_BLACK);
+    // Clear entire area
+    tft.fillRect(10, 175, 220, 30, ST77XX_BLACK);
 
-    tft.setTextSize(4);
+    // All on one line: Water level + Volume + Percentage
+    tft.setTextSize(3);
     tft.setTextColor(ST77XX_GREEN);
-    tft.setCursor(20, 180);
+    tft.setCursor(10, 180);
     tft.print(waterLevel);
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_WHITE);
-    tft.print(" cm");
-
-    tft.setTextSize(3);
-    tft.setTextColor(ST77XX_YELLOW);
-    tft.setCursor(140, 185);
-    tft.print(waterLevelPercent);
+    tft.print("cm ");
+    
     tft.setTextSize(2);
+    tft.setTextColor(ST77XX_MAGENTA);
+    tft.print(volume);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("mL ");
+    
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_YELLOW);
+    tft.print(waterLevelPercent);
     tft.setTextColor(ST77XX_WHITE);
     tft.print("%");
-
-    tft.fillRect(70, 210, 150, 20, ST77XX_BLACK);
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(20, 210);
-    tft.print("Vol:");
-    tft.setTextSize(3);
-    tft.setTextColor(ST77XX_MAGENTA);
-    tft.setCursor(70, 210);
-    tft.print(volume);
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print(" mL");
 
     lastWaterLevel = waterLevel;
   }
 }
+
 
 void updateActuatorsDisplay() {
   // Servo
