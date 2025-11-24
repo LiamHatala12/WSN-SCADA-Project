@@ -93,20 +93,32 @@ public:
   }
 
   void onReceive(const uint8_t *data, size_t len, bool broadcast) {
-    Serial.printf("[RX] Message received! len=%d, broadcast=%d\n", len, broadcast);
     esp_now_data_t *msg = (esp_now_data_t *)data;
 
+    // ADD DEBUG: Log ALL received messages
+    Serial.printf("[RX_CALLBACK] From " MACSTR " | Type=%d | Priority=%lu | Ready=%d | Broadcast=%d\n",
+                  MAC2STR(addr()), msg->msg_type, msg->priority, msg->ready, broadcast);
+
+    // Check ready flag
     if (!peer_ready && msg->ready) {
-      Serial.printf("Peer " MACSTR " ready\n", MAC2STR(addr()));
+      Serial.printf(">>> Peer " MACSTR " reported READY!\n", MAC2STR(addr()));
       peer_ready = true;
     }
 
-    if (broadcast) return;
+    // Early exit for broadcast (discovery) messages
+    if (broadcast) {
+      Serial.println("[RX_CALLBACK] Broadcast message - ignoring payload");
+      return;
+    }
 
-    if (!peer_is_master) return;
+    // Only process unicast messages from master
+    if (!peer_is_master) {
+      Serial.println("[RX_CALLBACK] Peer is not master - ignoring");
+      return;
+    }
 
     if (msg->msg_type == MSG_POLL_SENSOR) {
-      Serial.println("[SENSOR] Received poll request from HEAD");
+      Serial.println("[SENSOR] *** Received POLL_SENSOR from HEAD ***");
       
       long dist = readUltrasonicCm();
       Serial.printf("[SENSOR] Ultrasonic reading: %ld cm (distance to water surface)\n", dist);
@@ -120,15 +132,15 @@ public:
       reply.ready    = true;
 
       if (!send_message((const uint8_t *)&reply, sizeof(reply))) {
-        Serial.println("[SENSOR] Failed to send SENSOR_DATA");
+        Serial.println("[SENSOR] *** FAILED to send SENSOR_DATA ***");
       } else {
-        Serial.printf("[SENSOR] Sent SENSOR_DATA: %ld cm to HEAD\n", dist);
+        Serial.printf("[SENSOR] *** Sent SENSOR_DATA: %ld cm to HEAD ***\n", dist);
       }
     }
   }
 
   void onSent(bool success) {
-    log_i("Message sent %s", success ? "successfully" : "failed");
+    Serial.printf("[TX_CALLBACK] Message sent %s\n", success ? "successfully" : "FAILED");
   }
 };
 
@@ -159,7 +171,10 @@ uint32_t check_highest_priority() {
 
 bool check_all_peers_ready() {
   for (auto &peer : peers) {
-    if (!peer->peer_ready) return false;
+    if (!peer->peer_ready) {
+      Serial.printf("[CHECK_READY] Peer " MACSTR " NOT ready yet\n", MAC2STR(peer->addr()));
+      return false;
+    }
   }
   return true;
 }
@@ -172,21 +187,24 @@ void register_new_peer(const esp_now_recv_info_t *info,
   esp_now_data_t *msg = (esp_now_data_t *)data;
   int priority = (int)msg->priority;
 
+  Serial.printf("\n[REGISTER_PEER] *** New peer detected: " MACSTR " ***\n", MAC2STR(info->src_addr));
+  Serial.printf("[REGISTER_PEER] Priority: %d | Ready: %d\n", priority, msg->ready);
+
   if ((uint32_t)priority == self_priority) {
-    Serial.println("ERROR: duplicate priority");
+    Serial.println("[REGISTER_PEER] ERROR: duplicate priority");
     fail_reboot();
   }
 
-  if (current_peer_count >= ESPNOW_PEER_COUNT) return;
-
-  Serial.printf("New peer: " MACSTR " (priority %d)\n",
-                MAC2STR(info->src_addr), priority);
+  if (current_peer_count >= ESPNOW_PEER_COUNT) {
+    Serial.println("[REGISTER_PEER] Already have all expected peers - ignoring");
+    return;
+  }
 
   ESP_NOW_Network_Peer *new_peer =
     new (std::nothrow) ESP_NOW_Network_Peer(info->src_addr, priority);
 
   if (new_peer == nullptr || !new_peer->begin()) {
-    Serial.println("Failed to register peer");
+    Serial.println("[REGISTER_PEER] *** FAILED to register peer ***");
     delete new_peer;
     return;
   }
@@ -197,20 +215,22 @@ void register_new_peer(const esp_now_recv_info_t *info,
   if ((uint32_t)priority > self_priority) {
     new_peer->peer_is_master = true;
     master_peer = new_peer;
-    Serial.println("Peer identified as HEAD master");
+    Serial.println("[REGISTER_PEER] *** Peer identified as HEAD master ***");
   }
 
   if (current_peer_count == ESPNOW_PEER_COUNT) {
-    Serial.println("All peers found");
+    Serial.println("[REGISTER_PEER] *** All peers found! Setting ready flag ***");
     new_msg.ready = true;
   }
+
+  Serial.printf("[REGISTER_PEER] Current peer count: %d/%d\n\n", current_peer_count, ESPNOW_PEER_COUNT);
 }
 
 /* Setup */
 void setup() {
   uint8_t self_mac[6];
   Serial.begin(115200);
-  delay(500);
+  delay(1000);
 
   WiFi.mode(WIFI_STA);
   WiFi.setChannel(ESPNOW_WIFI_CHANNEL);
@@ -243,31 +263,45 @@ void setup() {
   new_msg.priority = self_priority;
   new_msg.ready    = false;
 
-  Serial.println("Sensor setup complete, discovering HEAD...");
+  Serial.println("Sensor setup complete, discovering HEAD...\n");
 }
 
 /* Loop */
 void loop() {
   if (!master_decided) {
+    Serial.printf("[LOOP] Broadcasting discovery (ready=%d, peer_count=%d/%d)\n", 
+                  new_msg.ready, current_peer_count, ESPNOW_PEER_COUNT);
+    
     broadcast_peer.send_message((const uint8_t *)&new_msg, sizeof(new_msg));
 
-    if (current_peer_count == ESPNOW_PEER_COUNT && check_all_peers_ready()) {
-      master_decided = true;
-      uint32_t highest_priority = check_highest_priority();
-      device_is_master = (highest_priority == self_priority);
+    if (current_peer_count == ESPNOW_PEER_COUNT) {
+      Serial.println("[LOOP] All peers found, checking if ready...");
+      if (check_all_peers_ready()) {
+        master_decided = true;
+        uint32_t highest_priority = check_highest_priority();
+        device_is_master = (highest_priority == self_priority);
 
-      if (device_is_master) {
-        Serial.println(">>> Sensor became master (unexpected)");
-      } else {
-        Serial.println(">>> Sensor is slave, HEAD is master");
-        for (auto &peer : peers) {
-          if (peer->priority == highest_priority) {
-            peer->peer_is_master = true;
-            master_peer = peer;
-            break;
+        if (device_is_master) {
+          Serial.println("\n>>> Sensor became master (unexpected)");
+        } else {
+          Serial.println("\n>>> SENSOR IS SLAVE, HEAD IS MASTER <<<");
+          Serial.println(">>> Waiting for poll requests from HEAD <<<\n");
+          for (auto &peer : peers) {
+            if (peer->priority == highest_priority) {
+              peer->peer_is_master = true;
+              master_peer = peer;
+              break;
+            }
           }
         }
       }
+    }
+  } else {
+    // Optional: Heartbeat to show sensor is alive
+    static uint32_t last_heartbeat = 0;
+    if (millis() - last_heartbeat > 5000) {
+      Serial.println("[HEARTBEAT] Sensor operational, waiting for polls...");
+      last_heartbeat = millis();
     }
   }
 
