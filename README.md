@@ -211,7 +211,7 @@ The Head Node implements a discrete PID controller:
 $$u(t) = K_p \cdot e(t) + K_i \cdot \int_0^t e(\tau) d\tau + K_d \cdot \frac{de(t)}{dt}$$
 
 Where:
-- $e(t) = \text{setpoint} - \text{water\_level}$
+- $e(t) = \text{setpoint} - \text{water level}$
 - $u(t)$ = control output (0-100%)
 
 ### Parameters
